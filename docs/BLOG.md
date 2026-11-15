@@ -1,120 +1,83 @@
-# From Unmanaged to Terraform in Minutes — Building an AgentCore Importer
+# Automating Terraform Imports with Amazon Bedrock AgentCore
 
-*by aquavis12 — November 15, 2026*
+*by aquavis12 · November 15, 2026*
 
----
-
-Watch the tool in action:
-
-📹 **[terraform-importer.mp4](https://videos-hackthon-593845248500-us-west-1-an.s3.us-west-1.amazonaws.com/terraform-importer.mp4)**
+> 📹 **[Watch the demo](https://videos-hackthon-593845248500-us-west-1-an.s3.us-west-1.amazonaws.com/terraform-importer.mp4)** · 💻 **[github.com/aquavis12/tfimport](https://github.com/aquavis12/tfimport)**
 
 ---
 
-## The problem: drift you can't see
+## The problem
 
-Every AWS account has them — resources clicked together in the console, a Lambda from a wizard, an SQS queue from a weekend prototype. They work, nobody knows exactly what they are, and no Terraform state file knows they exist.
+IaC has always been the right way to manage cloud infrastructure. The goal is simple: every AWS resource should live in a Terraform state file so the team can review changes, enforce standards, and avoid configuration drift.
 
-I used the draw.io tool to map a live AWS account and found an LMS application with Cognito, API Gateway, Lambda, DynamoDB tables, and S3 buckets — all real, all running, none in Terraform.
+The reality is messier. Resources get clicked together in the console, created by service wizards, or spun up during a proof of concept. `terraform import` can bring them under management — but only one resource at a time. For each one you look up the import ID, write the resource block by hand, run the import, fix the generated config, and repeat. For twenty resources across five types that is an afternoon of work. For a whole account region it simply never happens.
 
-![AWS account drift: resources found but not in Terraform](images/01-problem.png)
-
-Resources like `feedback-table` and the two session buckets are marked "Connected, not in scope (skipped)". That is the drift. And this is just one small application.
+`terraform plan -generate-config-out` changed that. It writes resource blocks automatically for a list of IDs. But it still needs discovery (which resources exist and are not already managed?), and the generated code sometimes has provider errors that need fixing. That is the gap this tool fills.
 
 ---
 
-## Architecture
+## How it is built
 
-The tool is deployed as an Amazon Bedrock AgentCore Runtime with four stages:
+The tool runs as an Amazon Bedrock AgentCore Runtime — a Python zip deployed directly, no container needed.
+
+![Architecture: AgentCore Runtime, Agent Registry, Gateway, S3](images/tfimport.png)
 
 ```mermaid
-flowchart TB
-    A[Discovery<br/>List all AWS resources] --> B[Filter out<br/>Terraform state<br/>CloudFormation<br/>AWS-created]
-    B --> C[Import<br/>terraform generate-config-out<br/>fmt · validate · plan]
-    C --> D[Tidy & Repair<br/>LLM with import skill<br/>Gateway for doc search]
-    D --> E{Gates pass?<br/>fmt · validate · plan}
-    E -->|Yes| F[Use LLM code]
-    E -->|No| G[Use Terraform code]
-    F --> H[Publish to S3<br/>.tf · README · zip]
-    G --> H
+flowchart LR
+    A[Discovery\nScan region\nFilter state · CF · AWS-created] --> B[Import\ngenerate-config-out\nfmt · validate · plan]
+    B --> C[Tidy\nLLM + import skill\nGateway for doc search]
+    C --> D{All gates pass?\nfmt · validate · plan}
+    D -->|Yes| E[S3: .tf files\nREADME · zip]
+    D -->|No| E
 ```
 
-- **Discovery** scans the account, filters out anything already in Terraform state, CloudFormation, or created by AWS itself.
-- **Import** runs `terraform plan -generate-config-out` for every unmanaged resource type.
-- **Tidy** sends the generated code to an LLM (NVIDIA Nemotron Super 3 120B). The LLM has the import skill as its system prompt and searches Terraform/AWS docs via the AgentCore Gateway when it needs to understand an argument.
-- **Publish** saves validated Terraform files, a README (via terraform-docs), and a zip to S3.
+**Discovery** lists every resource in the target region, then drops anything already in a Terraform state file, managed by CloudFormation, or created by AWS itself (default VPC, service-managed repos). What remains is genuinely unmanaged.
+
+**Import** runs `terraform plan -generate-config-out` for each type, then `fmt`, `validate`, and `plan`. If the provider rejects placeholder values Terraform wrote (e.g. `maximum_message_size = 0` on an SNS topic), the importer strips those lines and re-checks.
+
+**Tidy** sends the generated code to NVIDIA Nemotron Super 3 120B via Amazon Bedrock. The LLM uses the import skill from Agent Registry as its system prompt — naming conventions, tag rules, safety constraints, and the three gates every output must pass. When it needs to understand an argument it calls the AgentCore Gateway, which searches Terraform and AWS documentation restricted to three allowed domains. The model's output is used only if `fmt`, `validate`, and an import-only plan all pass. Otherwise Terraform's output is kept.
+
+**Publish** saves validated `.tf` files, a terraform-docs README, and a zip to S3.
+
+The import skill lives in Agent Registry so it can be updated without rebuilding the zip:
+
+![tfimport-skills registry — 1 Approved record, auto-approval enabled](images/02-skill-registry.png)
 
 ---
 
-## Key images
+## Running it
 
-### 1. Architecture diagram
+The Streamlit UI auto-discovers your AgentCore runtimes from the AWS control plane — no ARN to paste. Pick a region, click **Find and Import**.
 
-![Terraform Importer architecture](images/02-architecture.png)
+![Streamlit Import tab — terraform_importer READY, us-west-2](images/03-ui.png)
 
-The runtime sits in your AWS account, discovers resources, calls the LLM to tidy the generated code, and writes results to S3. The import skill comes from Agent Registry, and the Gateway gives the LLM read-only access to documentation.
-
-### 2. Streamlit UI
-
-![Streamlit UI for running imports](images/03-ui.png)
-
-A web interface that auto-discovers your AgentCore runtime — no ARN to paste manually. Pick a region, optionally set cross-account details, and click **Find and Import**. The first run takes a few minutes (downloading Terraform), later runs finish in under a minute.
-
-### 3. Results in S3
-
-![S3 results bucket with generated files](images/04-results.png)
-
-Each run creates a folder with:
-- `providers.tf` — Terraform and AWS provider config
-- `<resource>.tf` — Validated code for each type
-- `needs-review/` — Code that failed validation (with error as comment)
-- `README.md` — Generated by terraform-docs
-- `summary.json` — Machine-readable run summary
-- `terraform-import-*.zip` — Everything in one download
-
-### 4. Lambda discovered
-
-![Lambda function discovered and imported](images/05-lambda.png)
-
-The `SQS-Processor` Lambda in `us-west-1` was found and imported — it was not in any Terraform state or CloudFormation stack. The LLM named it from the function's `Name` tag following the import skill's naming rules.
+The first run downloads Terraform and the AWS provider (~few minutes). Later runs in the same session finish in under a minute.
 
 ---
 
-## How the LLM works
+## The result
 
-The model receives:
-- Generated HCL from Terraform
-- Import blocks for each resource ID
-- The import skill as system prompt (from Agent Registry)
-- Access to the Gateway as a tool for documentation lookup
+After the run the Results tab lets you browse past runs and download files directly from the browser:
 
-It outputs cleaned Terraform code. That output is verified with `terraform fmt`, `terraform validate`, and a plan that only imports and changes nothing. Only if all three gates pass is the LLM's code used. Otherwise, Terraform's original output is kept and notes explain why.
+![Streamlit Results tab — download buttons for each generated file](images/01-ui-results-tab.png)
 
-The Gateway is restricted to three domains: `developer.hashicorp.com`, `docs.aws.amazon.com`, and `registry.terraform.io`. Search results are treated as untrusted text — the LLM uses them to understand arguments, never as instructions.
+Each run produces a timestamped folder in S3 with everything needed to bring the resources under Terraform:
 
----
+![Generated README — SQS ready, SNS needs review, how-to-use steps](images/04-import-readme.png)
 
-## What I learned
+The SQS queue passed all three gates and is ready to apply. The SNS topic hit a provider error on placeholder values and went to `needs-review/` with the error as a comment — never silently dropped.
 
-- **Registry ID vs Record ID** — The runtime needs the Registry ID in `SKILL_REGISTRY_ID`. A common mistake is using the Record ID from a record's page instead.
-- **Gateway domain restrictions** — Without included domains, the Gateway lets the LLM search anywhere. Set `developer.hashicorp.com`, `docs.aws.amazon.com`, and `registry.terraform.io` explicitly.
-- **First run is slow** — The runtime downloads Terraform (~50 MB) and the AWS provider (~700 MB) on cold start. Later runs in the same session reuse them.
-- **Some resources need manual review** — SNS topics, for example, trigger provider errors on placeholder values like `maximum_message_size = 0`. Those go to `needs-review/` with the error as a comment.
+To use the output:
 
----
-
-## Try it yourself
-
-The full source is at [github.com/aquavis12/tfimport](https://github.com/aquavis12/tfimport). The deployment guide is in [`docs/DEPLOY.md`](DEPLOY.md).
-
-```powershell
-# Quick start
-cd ui
-pip install -r requirements.txt
-streamlit run app.py
+```bash
+unzip terraform-import-*.zip
+terraform init
+terraform plan    # N to import, 0 to add, 0 to change, 0 to destroy
+terraform apply
 ```
 
-The app discovers your AgentCore runtime automatically. Set `OUTPUT_BUCKET`, `SKILL_REGISTRY_ID`, and `GATEWAY_URL` on the runtime, then run an import from the UI.
+That is it. Resources that lived outside IaC are now in Terraform state. The import blocks are only needed once — after `apply`, remove them and keep the resource blocks.
 
 ---
 
-*MIT License — Copyright (c) 2026 aquavis12*
+*MIT License · Copyright © 2026 aquavis12*
