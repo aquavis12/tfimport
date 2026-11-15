@@ -1,0 +1,136 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyObjectReadsExceptState",
+      "Effect": "Deny",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "NotResource": [
+        "arn:aws:s3:::*/*.tfstate",
+        "arn:aws:s3:::tfimport-agentcore-code-<account-id>-us-east-1/importer/*"
+      ]
+    },
+    {
+      "Sid": "DenyDataAndSecrets",
+      "Effect": "Deny",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath",
+        "dynamodb:GetItem",
+        "dynamodb:BatchGetItem",
+        "dynamodb:Query",
+        "dynamodb:Scan",
+        "sqs:ReceiveMessage",
+        "kinesis:GetRecords",
+        "logs:GetLogEvents",
+        "logs:FilterLogEvents",
+        "logs:StartQuery"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DecryptStateViaS3",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": {
+        "StringLike": {
+          "kms:ViaService": "s3.*.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "AssumeTargetAccountRole",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::*:role/tf-importer-target"
+    },
+    {
+      "Sid": "InvokeModel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "WriteResults",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::tfimport-results-<account-id>-us-east-1/results/*"
+    },
+    {
+      "Sid": "InvokeDocsGateway",
+      "Effect": "Allow",
+      "Action": "bedrock-agentcore:InvokeGateway",
+      "Resource": "arn:aws:bedrock-agentcore:us-east-1:<account-id>:gateway/<gateway-id>"
+    },
+    {
+      "Sid": "ReadSkillFromRegistry",
+      "Effect": "Allow",
+      "Action": [
+        "agent-registry:SearchDiscoverableRegistryRecords",
+        "agent-registry:GetDiscoverableRegistryRecord"
+      ],
+      "Resource": "arn:aws:agent-registry:us-east-1:<account-id>:registry/*"
+    },
+    {
+      "Sid": "AgentCoreLogGroups",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogStreams",
+        "logs:CreateLogGroup"
+      ],
+      "Resource": "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/bedrock-agentcore/runtimes/*"
+    },
+    {
+      "Sid": "AgentCoreLogResourcePolicy",
+      "Effect": "Allow",
+      "Action": "logs:PutResourcePolicy",
+      "Resource": "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/bedrock-agentcore/runtimes/terraform_importer-*"
+    },
+    {
+      "Sid": "AgentCoreDescribeLogGroups",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "arn:aws:logs:us-east-1:<account-id>:log-group:*"
+    },
+    {
+      "Sid": "AgentCoreLogStreams",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "arn:aws:logs:us-east-1:<account-id>:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
+    },
+    {
+      "Sid": "AgentCoreXRay",
+      "Effect": "Allow",
+      "Action": [
+        "xray:PutTraceSegments",
+        "xray:PutTelemetryRecords",
+        "xray:GetSamplingRules",
+        "xray:GetSamplingTargets"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AgentCoreMetrics",
+      "Effect": "Allow",
+      "Action": "cloudwatch:PutMetricData",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "cloudwatch:namespace": "bedrock-agentcore"
+        }
+      }
+    }
+  ]
+}
